@@ -84,7 +84,8 @@ export async function buildApp() {
 
   // ===== Security: per-socket timeout + maxConnections =====
   fastify.server.on('connection', (socket) => {
-    socket.setTimeout(config.security.connectionTimeout);
+    const socketTimeout = Math.max(config.security.connectionTimeout, idleTimeout);
+    socket.setTimeout(socketTimeout);
     socket.on('timeout', () => {
       socket.destroy(new Error('Connection timeout'));
     });

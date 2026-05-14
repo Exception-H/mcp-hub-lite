@@ -49,8 +49,10 @@ import { getCompositeKey } from '@utils/composite-key.js';
  * ```
  */
 export class McpConnectionManager {
+  private static readonly DISCOVERY_REQUEST_TIMEOUT_MS = 5000;
   private clients: Map<string, Client> = new Map();
   private transports: Map<string, Transport> = new Map();
+  private requestTimeouts: Map<string, number> = new Map();
   private serverStatus: Map<string, ServerStatus> = new Map();
   private _toolCache: ToolCache = new ToolCache();
   private resourceCache: Map<string, Resource[]> = new Map();
@@ -76,6 +78,11 @@ export class McpConnectionManager {
         }
       }
     });
+  }
+
+  private getRequestOptions(compositeKey: string): { timeout: number } | undefined {
+    const requestTimeout = this.requestTimeouts.get(compositeKey);
+    return requestTimeout === undefined ? undefined : { timeout: requestTimeout };
   }
 
   /**
@@ -178,7 +185,7 @@ export class McpConnectionManager {
         const client = await this.establishClientConnection(transport);
 
         // 7. Register connection
-        this.registerConnection(compositeKey, serverName, client, transport);
+        this.registerConnection(compositeKey, serverName, client, transport, server.timeout);
 
         // 8. Update connected status
         this.updateConnectedStatus(compositeKey, client, pid);
@@ -450,10 +457,14 @@ export class McpConnectionManager {
     compositeKey: string,
     serverName: string,
     client: Client,
-    transport: Transport
+    transport: Transport,
+    requestTimeout?: number
   ): void {
     this.clients.set(compositeKey, client);
     this.transports.set(compositeKey, transport);
+    if (requestTimeout !== undefined) {
+      this.requestTimeouts.set(compositeKey, requestTimeout);
+    }
     this._toolCache.setNameMapping(serverName, compositeKey);
 
     if (!this.serverNameToCompositeKeys.has(serverName)) {
@@ -524,7 +535,6 @@ export class McpConnectionManager {
     }
 
     const tools = await this.refreshTools(serverName, serverIndex);
-    const resources = await this.refreshResources(serverName, serverIndex);
 
     eventBus.publish(EventTypes.TOOLS_UPDATED, {
       serverName,
@@ -532,11 +542,21 @@ export class McpConnectionManager {
       tools
     });
 
-    eventBus.publish(EventTypes.RESOURCES_UPDATED, {
-      serverName,
-      serverIndex,
-      resources
-    });
+    this.refreshResources(serverName, serverIndex)
+      .catch((error) => {
+        logger.warn(
+          `Skipping resources refresh for server [${getCompositeKey(serverName, serverIndex)}]: ${error instanceof Error ? error.message : String(error)}`,
+          LOG_MODULES.CONNECTION_MANAGER
+        );
+        return [];
+      })
+      .then((resources) => {
+        eventBus.publish(EventTypes.RESOURCES_UPDATED, {
+          serverName,
+          serverIndex,
+          resources
+        });
+      });
   }
 
   /**
@@ -552,11 +572,9 @@ export class McpConnectionManager {
     if (serverType === 'sse') return;
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (client as any).request(
-        { method: 'logging/setLevel', params: { level: 'info' } },
-        { timeout: 5000 }
-      );
+      await client.setLoggingLevel('info', {
+        timeout: McpConnectionManager.DISCOVERY_REQUEST_TIMEOUT_MS
+      });
       logger.info(
         `Sent logging/setLevel to server [${compositeKey}]`,
         LOG_MODULES.CONNECTION_MANAGER
@@ -779,6 +797,7 @@ export class McpConnectionManager {
     } finally {
       this.clients.delete(compositeKey);
       this.transports.delete(compositeKey);
+      this.requestTimeouts.delete(compositeKey);
       this._toolCache.clearTools(serverName, serverIndex);
       this.resourceCache.delete(compositeKey);
       this._toolCache.removeNameMappingById(compositeKey);
@@ -892,7 +911,9 @@ export class McpConnectionManager {
     }
 
     try {
-      const result = await client.listTools();
+      const result = await client.listTools(undefined, {
+        timeout: McpConnectionManager.DISCOVERY_REQUEST_TIMEOUT_MS
+      });
       const tools: Tool[] = result.tools.map((t) => ({
         name: t.name,
         description: t.description,
@@ -966,7 +987,9 @@ export class McpConnectionManager {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await (client as any).listResources();
+      const result = await (client as any).listResources(undefined, {
+        timeout: McpConnectionManager.DISCOVERY_REQUEST_TIMEOUT_MS
+      });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const resources: Resource[] = result.resources.map((r: any) => ({
         name: r.name,
@@ -1136,7 +1159,7 @@ export class McpConnectionManager {
       throw new Error(`Server ${compositeKey} not connected`);
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (client as any).readResource({ uri });
+    return (client as any).readResource({ uri }, this.getRequestOptions(compositeKey));
   }
 
   /**
@@ -1263,10 +1286,14 @@ export class McpConnectionManager {
     }
 
     try {
-      const result = await client.callTool({
-        name: toolName,
-        arguments: args
-      });
+      const result = await client.callTool(
+        {
+          name: toolName,
+          arguments: args
+        },
+        undefined,
+        this.getRequestOptions(compositeKey)
+      );
       return result;
     } catch (error) {
       logger.error(

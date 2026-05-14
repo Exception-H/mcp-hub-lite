@@ -23,7 +23,9 @@ import { formatMcpMessageForLogging, logNotificationMessage } from '@utils/logge
  *          Object containing the transport and server instances
  */
 export async function createSessionTransport() {
-  const transport = new StreamableHTTPServerTransport();
+  const transport = new StreamableHTTPServerTransport({
+    enableJsonResponse: true
+  });
   const server = gateway.createConnectionServer();
 
   // Set up message logging (use empty string for sessionId in per-request mode)
