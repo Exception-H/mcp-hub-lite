@@ -102,6 +102,32 @@ function getSystemToolName(toolName: string): string | null {
   return null;
 }
 
+function resolveGatewayToolTarget(
+  toolName: string,
+  toolMap: Map<string, ToolMapEntry>
+): ToolMapEntry | undefined {
+  let target = toolMap.get(toolName);
+  if (target) {
+    return target;
+  }
+
+  // Streamable HTTP currently creates a fresh MCP server per request, so the
+  // toolMap populated by a prior tools/list request is not available here.
+  // Rebuild it lazily from the live connection cache to keep tools/list and
+  // tools/call consistent for aggregated gateway tools.
+  generateGatewayToolsList(toolMap);
+  target = toolMap.get(toolName);
+
+  if (target) {
+    logger.debug(
+      `Tool lookup recovered after lazy gateway tool map rebuild: toolName=${toolName} -> serverName=${target.serverName}, serverIndex=${target.serverIndex}, realToolName=${target.realToolName}`,
+      LOG_MODULES.GATEWAY
+    );
+  }
+
+  return target;
+}
+
 /**
  * Register call tool handler on the MCP server.
  *
@@ -146,7 +172,7 @@ export function registerCallToolHandler(
       return await executeSystemToolCall(systemToolName, toolArgs);
     }
 
-    const target = toolMap.get(toolName);
+    const target = resolveGatewayToolTarget(toolName, toolMap);
 
     logger.debug(
       `Tool lookup SUCCESS: toolName=${toolName} -> serverName=${target?.serverName}, serverIndex=${target?.serverIndex}, realToolName=${target?.realToolName}`,
